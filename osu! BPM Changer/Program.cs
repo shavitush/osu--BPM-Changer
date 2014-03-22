@@ -10,6 +10,8 @@ using System.Threading.Tasks;
 using System.IO;
 using BMAPI;
 using smgiFuncs;
+using NAudio.Wave;
+using System.Runtime.InteropServices;
 
 namespace osu__BPM_Changer
 {
@@ -26,6 +28,7 @@ namespace osu__BPM_Changer
         private static string oldCreator;
         private static bool saveAsMP3 = true;
         private static bool versionSet;
+        private static Quality encodeQuality = Quality.None;
 
         [STAThread]
         static void Main()
@@ -52,9 +55,9 @@ namespace osu__BPM_Changer
                             BM.Creator = settings.GetSetting("customCreator");
                         }
                         if (settings.ContainsSetting("customSaveAsMP3"))
-                        {
                             saveAsMP3 = Convert.ToBoolean(Convert.ToInt32(settings.GetSetting("customSaveAsMP3")));
-                        }
+                        if (settings.ContainsSetting("customEncodeQuality"))
+                            encodeQuality = (Quality)Convert.ToInt32(settings.GetSetting("customEncodeQuality"));
                     }
                     catch (Exception e)
                     {
@@ -130,6 +133,7 @@ namespace osu__BPM_Changer
                 Console.WriteLine("Version: [" + BM.Version + "]");
                 Console.WriteLine("Creator: " + BM.Creator);
                 Console.WriteLine("Song format: " + (saveAsMP3 ? "MP3" : "WAV"));
+                Console.WriteLine("Extra encoding quality: " + encodeQuality);
                 Console.ForegroundColor = ConsoleColor.White;
                 Console.WriteLine("-------------------------------------------------------------------------------");
 
@@ -172,6 +176,7 @@ namespace osu__BPM_Changer
                         Console.WriteLine("(1) Change BPM");
                         Console.WriteLine("(2) Change version");
                         Console.WriteLine("(3) Save beatmap\n");
+                        Console.WriteLine("(7) Change encoding quality");
                         Console.WriteLine("(8) Change song format");
                         Console.WriteLine("(9) Set custom creator");
                         Console.WriteLine("(0) Select another beatmap\n");
@@ -197,7 +202,7 @@ namespace osu__BPM_Changer
                             case 0:
                                 page = -1;
                                 continue;
-                            case 1: case 2: case 3: case 8: case 9:
+                            case 1: case 2: case 3: case 8: case 9: case 7:
                                 page = option;
                                 continue;
                             default:
@@ -308,9 +313,65 @@ namespace osu__BPM_Changer
                         continue;
 
                     case 3:
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine("Processing audio...");
+                        Console.ForegroundColor = ConsoleColor.White;
                         try
                         {
-                            CopyFile(BM.Filename.Substring(0, BM.Filename.LastIndexOf("\\", StringComparison.InvariantCulture) + 1) + BM.AudioFilename, Environment.CurrentDirectory + "\\temp.mp3").Wait();
+                            AudioFileReader reader = new AudioFileReader(BM.Filename.Substring(0, BM.Filename.LastIndexOf("\\", StringComparison.InvariantCulture) + 1) + NormalizeText(BM.AudioFilename));
+                            WaveFileWriter writer = new WaveFileWriter(Application.StartupPath + "\\temp.wav", reader.WaveFormat);
+                            SoundTouchWrapper soundTouch = new SoundTouchWrapper();
+
+                            soundTouch.CreateInstance();
+                            soundTouch.SetChannels(reader.WaveFormat.Channels);
+                            soundTouch.SetSampleRate(reader.WaveFormat.SampleRate);
+                            soundTouch.SetTempo(1 + (float)(Math.Pow(bpmRatio, -1) - 1));
+                            soundTouch.SetSetting(SoundTouchWrapper.SoundTouchSettings.SETTING_USE_AA_FILTER, 1);
+                            soundTouch.SetSetting(SoundTouchWrapper.SoundTouchSettings.SETTING_AA_FILTER_LENGTH, 128);
+                            soundTouch.SetSetting(SoundTouchWrapper.SoundTouchSettings.SETTING_OVERLAP_MS, (int)encodeQuality);
+                            soundTouch.SetSetting(SoundTouchWrapper.SoundTouchSettings.SETTING_SEQUENCE_MS, (int)encodeQuality);
+                            soundTouch.SetSetting(SoundTouchWrapper.SoundTouchSettings.SETTING_SEEKWINDOW_MS, (int)encodeQuality == 0? 0 : 40 / (int)encodeQuality);
+
+                            FloatByte data = new FloatByte { Bytes = new byte[65536 * sizeof(float)] };
+                            uint outFloatBufferSize = (uint)data.Bytes.Length / (uint)(sizeof(float) * reader.WaveFormat.Channels);
+
+                            while (reader.Position < reader.Length)
+                            {
+                                Console.WriteLine("Processed {0} out of {1} bytes. {2}%", reader.Position, reader.Length, (reader.Position * 100 / reader.Length).ToString("0"));
+                                int bytesRead = reader.Read(data.Bytes, 0, data.Bytes.Length);
+                                int samplesPerChannel = bytesRead / (sizeof(float) * reader.WaveFormat.Channels);
+
+                                soundTouch.PutSamples(data.Floats, (uint)samplesPerChannel);
+
+                                uint samplesProcessed;
+                                do
+                                {
+                                    samplesProcessed = soundTouch.ReceiveSamples(data.Floats, outFloatBufferSize);
+                                    writer.Write(data.Bytes, 0, (int)samplesProcessed * sizeof(float) * reader.WaveFormat.Channels);
+
+                                } while (samplesProcessed != 0);
+                            }
+                            writer.Flush();
+                            reader.Dispose();
+                            writer.Dispose();
+                            soundTouch.Dispose();
+
+                            BM.AudioFilename = BM.AudioFilename.Substring(0, BM.AudioFilename.LastIndexOf(".", StringComparison.InvariantCulture)) + NormalizeText(BM.Version) + (saveAsMP3 ? ".mp3" : ".wav");
+                            Process p = new Process();
+                            p.StartInfo.RedirectStandardOutput = true;
+                            p.StartInfo.CreateNoWindow = false;
+                            p.StartInfo.UseShellExecute = false;
+                            if (saveAsMP3)
+                            {
+                                p.StartInfo.FileName = "lame.exe";
+                                p.StartInfo.Arguments = "temp.wav temp.mp3";
+                                p.Start();
+                                p.WaitForExit();
+                                CopyFile(Environment.CurrentDirectory + "\\temp.mp3", BM.Filename.Substring(0, BM.Filename.LastIndexOf("\\", StringComparison.InvariantCulture)) + "\\" + NormalizeText(BM.AudioFilename)).Wait();
+                            }
+                            else
+                                CopyFile(Environment.CurrentDirectory + "\\temp.wav", BM.Filename.Substring(0, BM.Filename.LastIndexOf("\\", StringComparison.InvariantCulture)) + "\\" + NormalizeText(BM.AudioFilename)).Wait();
+
                         }
                         catch
                         {
@@ -318,29 +379,6 @@ namespace osu__BPM_Changer
                             page = 0;
                             continue;
                         }
-                        BM.AudioFilename = BM.AudioFilename.Substring(0, BM.AudioFilename.LastIndexOf(".", StringComparison.InvariantCulture)) + NormalizeText(BM.Version) + (saveAsMP3 ? ".mp3" : ".wav");
-                        Process p = new Process();
-                        p.StartInfo.RedirectStandardOutput = true;
-                        p.StartInfo.CreateNoWindow = false;
-                        p.StartInfo.UseShellExecute = false;
-                        p.StartInfo.FileName = "lame.exe";
-                        p.StartInfo.Arguments = "--decode temp.mp3 temp.wav";
-                        p.Start();
-                        p.WaitForExit();
-                        p.StartInfo.FileName = "soundstretch.exe";
-                        p.StartInfo.Arguments = "temp.wav temp2.wav -tempo=" + (Math.Pow(bpmRatio, -1) - 1) * 100;
-                        p.Start();
-                        p.WaitForExit();
-                        if (saveAsMP3)
-                        {
-                            p.StartInfo.FileName = "lame.exe";
-                            p.StartInfo.Arguments = "temp2.wav temp3.mp3";
-                            p.Start();
-                            p.WaitForExit(); 
-                            CopyFile(Environment.CurrentDirectory + "\\temp3.mp3", BM.Filename.Substring(0, BM.Filename.LastIndexOf("\\", StringComparison.InvariantCulture)) + "\\" + BM.AudioFilename).Wait();
-                        }
-                        else
-                            CopyFile(Environment.CurrentDirectory + "\\temp2.wav", BM.Filename.Substring(0, BM.Filename.LastIndexOf("\\", StringComparison.InvariantCulture)) + "\\" + BM.AudioFilename).Wait();
 
                         Console.ForegroundColor = ConsoleColor.Green;
                         Console.WriteLine("Saving beatmap...");
@@ -348,14 +386,58 @@ namespace osu__BPM_Changer
                         BM.Save(BM.Filename);
 
                         Console.WriteLine("Cleaning up...");
-                        File.Delete(Environment.CurrentDirectory + "\\temp.mp3");
                         File.Delete(Environment.CurrentDirectory + "\\temp.wav");
                         File.Delete(Environment.CurrentDirectory + "\\temp2.wav");
-                        File.Delete(Environment.CurrentDirectory + "\\temp3.mp3");
 
                         
                         Console.WriteLine("Done! Press any key to go to menu.");
                         Console.ReadKey();
+                        page = 0;
+                        continue;
+
+                    case 7:
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine("Most people don't need to change this unless they're reducing the tempo by more than 50%.");
+                        Console.WriteLine("This will increase processing time for maps and this setting will be remembered for every other map.\n");
+                        Console.WriteLine("Select quality option by typing any of the following numbers:");
+                        int i = 0;
+                        foreach (Quality q in Enum.GetValues(typeof(Quality)))
+                        {
+                            Console.WriteLine("(" + i + ") " + Enum.GetName(typeof(Quality), q));
+                            i += 1;
+                        }
+                        Console.ForegroundColor = ConsoleColor.White;
+                        Console.WriteLine("\nOption: ");
+
+                        input = Console.ReadKey().KeyChar.ToString(CultureInfo.InvariantCulture);
+                        
+                        switch (input)
+                        {
+                            case "0":
+                                encodeQuality = Quality.None;
+                                break;
+                            case "1":
+                                encodeQuality = Quality.Extreme;
+                                break;
+                            case "2":
+                                encodeQuality = Quality.Very_Good;
+                                break;
+                            case "3":
+                                encodeQuality = Quality.Good;
+                                break;
+                            case "4":
+                                encodeQuality = Quality.Low;
+                                break;
+                            case "5":
+                                encodeQuality = Quality.Lowest;
+                                break;
+                            default:
+                                errorText = "Invalid quality option entered.";
+                                page = 0;
+                                continue;
+                        }
+                        settings.AddSetting("customEncodeQuality", ((int)encodeQuality).ToString(CultureInfo.InvariantCulture));
+                        settings.Save();
                         page = 0;
                         continue;
 
@@ -412,6 +494,25 @@ namespace osu__BPM_Changer
                     await srcStream.CopyToAsync(dstStream);
                 }
             }
+        }
+        [StructLayout(LayoutKind.Explicit)]
+        public struct FloatByte
+        {
+            [FieldOffset(0)]
+            public Byte[] Bytes;
+
+            [FieldOffset(0)]
+            public float[] Floats;
+        }
+
+        public enum Quality
+        {
+            None = 0,
+            Extreme = 1,
+            Very_Good = 5,
+            Good = 10,
+            Low = 20,
+            Lowest = 100
         }
     }
 }
