@@ -34,7 +34,7 @@ namespace osu__BPM_Changer
         static void Main()
         {
             Application.CurrentCulture = new CultureInfo("en-US", false);
-            Thread updaterThread = new Thread(UpdaterStart);
+            // Thread updaterThread = new Thread(UpdaterStart); go away
             updaterThread.IsBackground = true;
             updaterThread.Start();
 
@@ -70,18 +70,6 @@ namespace osu__BPM_Changer
                     Console.ReadKey();
                 }
             }
-        }
-
-        public static void UpdaterStart()
-        {
-            u.updateReady += UpdateCB;
-            u.Start(settings);
-        }
-
-        public static void UpdateCB(object sender, EventArgs e)
-        {
-            updateExists = true;
-            DisplayUpdateString();
         }
 
         public static void DisplayUpdateString()
